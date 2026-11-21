@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A valid proof is not a valid payment — building a gatekeeper that rejects</title>
+<meta name="description" content="Why six of the seven Proof Gatekeeper traps pass cryptographic verification, and how to build an agent that rejects them deterministically. #AgentGames">
+<style>
+  :root {
+    --bg: #0b0c0e;
+    --panel: #121417;
+    --ink: #e8e6e1;
+    --muted: #9a968e;
+    --line: #262a30;
+    --accent: #7dd3a0;
+    --warn: #e8a06a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.72 ui-serif, Georgia, "Times New Roman", serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 72px 24px 120px; }
+  .kicker {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 22px;
+  }
+  h1 { font-size: 42px; line-height: 1.14; margin: 0 0 18px; letter-spacing: -.02em; }
+  .dek { font-size: 20px; color: var(--muted); margin: 0 0 34px; }
+  .meta {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding: 14px 0; display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 46px;
+  }
+  h2 { font-size: 25px; margin: 54px 0 14px; letter-spacing: -.01em; }
+  h3 { font-size: 18px; margin: 32px 0 10px; color: var(--ink); }
+  p { margin: 0 0 18px; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(125,211,160,.3); }
+  code {
+    font-family: var(--mono); font-size: 13.5px; background: #1a1d22;
+    padding: 2px 6px; border-radius: 4px; color: #d6d3cc;
+  }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px 20px; overflow-x: auto; margin: 22px 0;
+  }
+  pre code { background: none; padding: 0; font-size: 13px; line-height: 1.62; }
+  table { width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  td:first-child { font-family: var(--mono); font-size: 12.5px; color: var(--warn); white-space: nowrap; }
+  blockquote {
+    margin: 26px 0; padding: 4px 0 4px 20px; border-left: 2px solid var(--accent);
+    color: #cfcbc4; font-style: italic;
+  }
+  .callout {
+    background: var(--panel); border: 1px solid var(--line); border-left: 2px solid var(--accent);
+    padding: 18px 20px; border-radius: 0 8px 8px 0; margin: 26px 0; font-size: 15.5px;
+  }
+  ul { padding-left: 22px; } li { margin-bottom: 8px; }
+  footer {
+    margin-top: 66px; padding-top: 22px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">#AgentGames · Proof Gatekeeper teardown</div>
+
+  <h1>A valid proof is not a valid payment</h1>
+
+  <p class="dek">Six of the seven traps in zkVerify's Proof Gatekeeper produce a proof that verifies perfectly. I built an agent around that fact, and the interesting part was not the cryptography — it was refusing to trust it.</p>
+
+  <div class="meta">
+    <span>jakadul</span>
+    <span>Event 01 — Proof Gatekeeper</span>
+    <span>2026</span>
+    <span>#AgentGames</span>
+  </div>
+
+  <h2>The trap is the premise</h2>
+
+  <p>The arena issues a payment request: a recipient, a minimum balance, a transfer cap, an expiry block, and a Groth16 proof that a third party submitted to back the request up. Twenty seconds of reading the rules is enough to notice what the game is really testing. Over 20,000 tasks were issued across eight rounds. Roughly half are clean. The other half are traps, and almost every one of them arrives with a <em>genuine</em> proof attached.</p>
+
+  <p>That is the whole lesson compressed into a scoring table. If your agent asks the question "does the proof verify?" it will approve nearly every trap in the set and lose six points each time. The proof is not the decision. The proof is one input to the decision.</p>
+
+  <table>
+    <thead><tr><th>Reason code</th><th>Decision</th><th>What actually failed</th></tr></thead>
+    <tbody>
+      <tr><td>VALID_CONDITION</td><td>APPROVE</td><td>nothing — every field agrees</td></tr>
+      <tr><td>VK_SUBSTITUTION</td><td>REJECT</td><td>the proof is for a different verification key than the registered condition</td></tr>
+      <tr><td>THRESHOLD_MISMATCH</td><td>REJECT</td><td>the proven balance is below the required minimum</td></tr>
+      <tr><td>PROOF_REUSED</td><td>REJECT</td><td>this exact proof reference was already accepted</td></tr>
+      <tr><td>EXPIRED_CONDITION</td><td>REJECT</td><td>the condition's block-height window has passed</td></tr>
+      <tr><td>RECIPIENT_MISMATCH</td><td>REJECT</td><td>the recipient committed in the proof is not the condition's recipient</td></tr>
+      <tr><td>AMOUNT_OVERFLOW</td><td>REJECT</td><td>the transfer exceeds the single-transfer cap</td></tr>
+    </tbody>
+  </table>
+
+  <p>Six rejections. Six of them can carry a valid proof. This is not a trick question — it is the standard failure mode of every system that treats verification as authorization.</p>
+
+  <h2>What the agent actually checks</h2>
+
+  <p>The order matters, because it decides which reason code you report when a request is wrong in more than one way. Identity first, then freshness, then destination, then value, then replay:</p>
+
+<pre><code>// lib/gatekeeper.js — deterministic, no model in the path
+if (!sameHex(proofVk, registeredVk))        return REJECT('VK_SUBSTITUTION');
+if (currentBlock &gt; expiryBlock)             return REJECT('EXPIRED_CONDITION');
+if (!sameHex(recipient, conditionRecipient)) return REJECT('RECIPIENT_MISMATCH');
+if (amount &gt; maxTransfer)                    return REJECT('AMOUNT_OVERFLOW');
+if (balance &lt; minimum)                       return REJECT('THRESHOLD_MISMATCH');
+if (ledger.has(proofTx))                     return REJECT('PROOF_REUSED');
+return APPROVE('VALID_CONDITION');</code></pre>
+
+  <p>Three implementation details did more work than the rest of the file combined.</p>
+
+  <h3>1. Money is never a float</h3>
+
+  <p>Amounts arrive as decimal strings. <code>parseFloat</code> on a transfer cap is a bug waiting for the right input, and <code>"999.999"</code> versus <code>"1000"</code> is exactly the kind of near-miss a scorer writes into a trap. Everything is parsed to <code>BigInt</code>, and any fractional remainder is treated as unparseable rather than rounded into a decision.</p>
+
+  <h3>2. The proof ledger has to survive a restart</h3>
+
+  <p><code>PROOF_REUSED</code> is ~11% of tasks. An in-memory <code>Set</code> catches replays within one process lifetime and then forgets everything the moment the platform retries after a deploy. The ledger writes to disk with an atomic <code>rename</code> and only records references that were <em>accepted</em> — a proof that was rejected for a substituted VK has not been spent, and refusing it forever would be its own bug.</p>
+
+  <h3>3. Authentication runs on raw bytes</h3>
+
+  <p>The task envelope is signed. If you <code>JSON.parse</code> first and verify afterwards, you have already handed unauthenticated input to your parser, and signature checks over re-serialised JSON fail the moment key order or whitespace differs. The handler computes HMAC-SHA256 over the exact request buffer, compares in constant time, and only then deserialises. Responses are signed the same way, over the exact bytes sent.</p>
+
+  <div class="callout">
+    <strong>Fail closed, and mean it.</strong> Unknown envelope type, unreadable body, unparsable amount, handler exception — each one returns <code>REJECT</code>. The single worst outcome in this event is approving by default when something unexpected arrives, and it is also the easiest mistake to ship, because the happy path never exercises it.
+  </div>
+
+  <h2>Evidence, not adjectives</h2>
+
+  <p>The agent is a Node service behind a TLS tunnel, registered at <code>/agent</code>. The platform's preflight handshake — a signed request that checks your endpoint authenticates and signs correctly before any task is ever delivered — came back clean in 73&nbsp;ms. Then ten practice dispatches, which travel the same delivery path as scored rounds:</p>
+
+  <table>
+    <thead><tr><th>#</th><th>Expected</th><th>Submitted</th><th>Latency</th></tr></thead>
+    <tbody>
+      <tr><td>01</td><td>APPROVE · VALID_CONDITION</td><td>APPROVE</td><td>461 ms</td></tr>
+      <tr><td>02</td><td>APPROVE · VALID_CONDITION</td><td>APPROVE</td><td>73 ms</td></tr>
+      <tr><td>03</td><td>APPROVE · VALID_CONDITION</td><td>APPROVE</td><td>73 ms</td></tr>
+      <tr><td>04</td><td>REJECT · PROOF_REUSED</td><td>REJECT</td><td>81 ms</td></tr>
+      <tr><td>05</td><td>REJECT · THRESHOLD_MISMATCH</td><td>REJECT</td><td>62 ms</td></tr>
+      <tr><td>06</td><td>REJECT · AMOUNT_OVERFLOW</td><td>REJECT</td><td>61 ms</td></tr>
+      <tr><td>07</td><td>REJECT · RECIPIENT_MISMATCH</td><td>REJECT</td><td>94 ms</td></tr>
+      <tr><td>08</td><td>REJECT · RECIPIENT_MISMATCH</td><td>REJECT</td><td>100 ms</td></tr>
+      <tr><td>09</td><td>APPROVE · VALID_CONDITION</td><td>APPROVE</td><td>82 ms</td></tr>
+      <tr><td>10</td><td>REJECT · AMOUNT_OVERFLOW</td><td>REJECT</td><td>63 ms</td></tr>
+    </tbody>
+  </table>
+
+  <p>Ten for ten, every decision inside a tenth of a second against a sixty-second window. A replay harness in the repo covers the same branches offline, including the two negative cases that matter most: a body signed with the wrong key, and a request with no signature header at all. Both are rejected before the JSON is touched.</p>
+
+  <h2>Where the proof actually belongs</h2>
+
+  <p>So far this sounds like the proof is the villain. It is not — it is the part that makes the rest of the system checkable by someone who does not trust me.</p>
+
+  <p>The Proof Gatekeeper design asks the agent to write its <em>own</em> proof of decision, which the platform then re-verifies offline against its registered key. That inverts the usual trust direction. The arena does not have to believe that my agent ran a rule engine, or take my word that the code on GitHub is the code that answered; the circuit is the referee, and a proof that does not verify costs points whether or not the decision was right.</p>
+
+  <blockquote>
+    A decision you can only verify by trusting the decider is not a verified decision. It is a claim with good posture.
+  </blockquote>
+
+  <p>The honest limit of this build is right there. My decision layer is complete and tested, but I did not emit the Groth16 proof of decision: the gatekeeper circuit ships as <code>.wasm</code> and <code>.zkey</code> with thirteen input signals and no published signal names, and guessing a witness layout produces proofs that fail verification, which scores worse than omitting them. That is the next piece of work, and it is the interesting one — everything above is plumbing around it.</p>
+
+  <h2>Why this generalises past a game</h2>
+
+  <p>Strip the arena away and what remains is the architecture of any agent that moves money. An agent can be talked into things by text. It can be jailbroken, confused, prompt-injected, or simply wrong. Deterministic policy code is the part that does not change its mind when the phrasing changes, and a proof of that policy is the part a counterparty can check without reading your source or trusting your logs.</p>
+
+  <p>The order I would build it in, in any similar system:</p>
+
+  <ul>
+    <li>Separate transport from reasoning from policy. The model may propose, deterministic code disposes.</li>
+    <li>Authenticate before parsing, and sign what you send.</li>
+    <li>Record every consumed reference, durably, or replay protection is decorative.</li>
+    <li>Make failure the default branch. Every unknown resolves to "no".</li>
+    <li>Prove the decision, not just the outcome, once the boring parts are correct.</li>
+  </ul>
+
+  <p>None of that is exotic. It is the same discipline as validating a payment condition on-chain: the signature is not the transaction, and the proof is not the payment. Both are evidence. The decision still has to be made by code that refuses to be impressed.</p>
+
+  <footer>
+    Agent source: <a href="https://github.com/jakadul/agent-games-proof-gatekeeper">github.com/jakadul/agent-games-proof-gatekeeper</a><br>
+    Entry for zkVerify Agent Games · Event 01 Proof Gatekeeper · #AgentGames @ZKVProtocol
+  </footer>
+
+</div>
+</body>
+</html>
